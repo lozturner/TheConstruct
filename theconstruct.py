@@ -158,8 +158,25 @@ def get_transcript(
             "youtube-transcript-api not installed. Run: pip install youtube-transcript-api"
         ) from e
 
+    def _normalize(fetched) -> list[dict]:
+        # youtube-transcript-api >=1.0 returns a FetchedTranscript whose snippets
+        # are objects with .text/.start/.duration. Older versions returned list[dict].
+        snippets = getattr(fetched, "snippets", fetched)
+        out = []
+        for s in snippets:
+            if isinstance(s, dict):
+                out.append({"text": s.get("text", ""), "start": s.get("start", 0)})
+            else:
+                out.append({"text": getattr(s, "text", ""), "start": getattr(s, "start", 0)})
+        return out
+
     try:
-        listing = YouTubeTranscriptApi.list_transcripts(video_id)
+        # v1.x uses instance methods (list/fetch); v0.x used classmethods (list_transcripts).
+        if hasattr(YouTubeTranscriptApi, "list_transcripts"):
+            listing = YouTubeTranscriptApi.list_transcripts(video_id)  # type: ignore[attr-defined]
+        else:
+            listing = YouTubeTranscriptApi().list(video_id)
+
         chosen = None
         if prefer_manual:
             try:
@@ -170,14 +187,13 @@ def get_transcript(
             try:
                 chosen = listing.find_transcript(languages)
             except NoTranscriptFound:
-                # Try to translate any available transcript into the first requested language
                 for t in listing:
-                    if t.is_translatable:
+                    if getattr(t, "is_translatable", False):
                         chosen = t.translate(languages[0])
                         break
         if chosen is None:
             raise TranscriptError("No usable transcript found in any requested language.")
-        segments = chosen.fetch()
+        segments = _normalize(chosen.fetch())
         return _format_segments(segments, with_timestamps)
     except TranscriptsDisabled as e:
         raise TranscriptError("Captions are disabled for this video.") from e
