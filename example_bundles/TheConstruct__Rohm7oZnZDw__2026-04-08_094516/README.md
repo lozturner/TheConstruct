@@ -1,0 +1,18 @@
+# Rohm7oZnZDw
+
+Created: 2026-04-08_094516
+
+- URL: https://youtube.com/shorts/Rohm7oZnZDw?si=jtHqrrGyeHWT7-n9
+- Video ID: Rohm7oZnZDw
+- Voice ID: local-tts
+- Audio file: hello.wav
+- Transcript length: 614 chars
+- Transcript error: TranscriptError: yt-dlp failed: ERROR: [youtube] Rohm7oZnZDw: Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass cookies. Also see  https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies  for tips on effectively exporting YouTube cookies
+
+## Files
+- `transcript.txt` — plain transcript
+- `transcript-timestamped.txt` — with timestamps
+- `hello.wav` — greeting audio
+- `metadata.json` — machine-readable details
+- `run.py` — re-runnable script for this URL
+- `WALKTHROUGH.md` — how the system works
