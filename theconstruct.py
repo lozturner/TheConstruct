@@ -329,6 +329,9 @@ def _parse_caption_body(body: str) -> list[dict]:
     return segments
 
 
+BROWSER_DEBUG_DIR: Optional[Path] = None  # set by create_session_bundle
+
+
 def _browser_transcript_fetch(
     video_id: str, languages: list[str], with_timestamps: bool
 ) -> Optional[str]:
@@ -340,10 +343,29 @@ def _browser_transcript_fetch(
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
     except ImportError:
+        log.debug("playwright not installed")
         return None
 
+    debug: dict = {"steps": []}
+
+    def _step(msg: str, **kw):
+        entry = {"msg": msg, **kw}
+        debug["steps"].append(entry)
+        log.info("[browser] %s %s", msg, kw if kw else "")
+
+    def _save_debug():
+        if BROWSER_DEBUG_DIR is None:
+            return
+        try:
+            BROWSER_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+            (BROWSER_DEBUG_DIR / "browser_debug.json").write_text(
+                json.dumps(debug, indent=2, default=str), encoding="utf-8"
+            )
+        except Exception as e:
+            log.warning("could not save browser debug: %s", e)
+
     url = f"https://www.youtube.com/watch?v={video_id}&hl=en"
-    log.info("Browser fetch via Playwright: %s", url)
+    _step("starting", url=url)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
@@ -368,6 +390,7 @@ def _browser_transcript_fetch(
             )
             page = ctx.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            _step("page loaded", final_url=page.url, title=page.title())
 
             # Dismiss any consent banner so the page actually loads its scripts
             for sel in (
@@ -378,23 +401,24 @@ def _browser_transcript_fetch(
             ):
                 try:
                     page.locator(sel).first.click(timeout=2500)
+                    _step("dismissed consent", selector=sel)
                     break
                 except Exception:
                     pass
 
-            # Wait until ytInitialPlayerResponse is parsed onto window
             try:
                 page.wait_for_function(
                     "typeof window.ytInitialPlayerResponse !== 'undefined' "
                     "&& window.ytInitialPlayerResponse !== null",
                     timeout=20000,
                 )
+                _step("ytInitialPlayerResponse present")
             except Exception:
-                pass
+                _step("ytInitialPlayerResponse wait timeout")
 
             player = page.evaluate("() => window.ytInitialPlayerResponse || null")
             if not player:
-                # Fall back: regex out of the raw HTML
+                _step("evaluating window var returned null, regex over HTML")
                 try:
                     html = page.content()
                     import re as _re
@@ -402,15 +426,40 @@ def _browser_transcript_fetch(
                     m = _re.search(r"ytInitialPlayerResponse\s*=\s*(\{.+?\});", html)
                     if m:
                         player = _json.loads(m.group(1))
-                except Exception:
-                    pass
+                        _step("regex extracted player")
+                except Exception as e:
+                    _step("regex extraction failed", err=str(e))
+
+            if BROWSER_DEBUG_DIR is not None:
+                try:
+                    page.screenshot(path=str(BROWSER_DEBUG_DIR / "browser_screenshot.png"), full_page=True)
+                    _step("saved screenshot")
+                except Exception as e:
+                    _step("screenshot failed", err=str(e))
 
             if not player:
+                _step("no player config — abort")
+                _save_debug()
                 return None
 
+            vd = player.get("videoDetails") or {}
+            debug["videoDetails"] = {
+                "title": vd.get("title"),
+                "author": vd.get("author"),
+                "lengthSeconds": vd.get("lengthSeconds"),
+                "isLiveContent": vd.get("isLiveContent"),
+                "shortDescription": (vd.get("shortDescription") or "")[:200],
+            }
             cap = (player.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}
             tracks = cap.get("captionTracks") or []
+            debug["caption_tracks"] = [
+                {"lang": t.get("languageCode"), "kind": t.get("kind"), "name": (t.get("name") or {}).get("simpleText")}
+                for t in tracks
+            ]
+            _step("captions enumerated", count=len(tracks))
             if not tracks:
+                _step("no caption tracks for this video")
+                _save_debug()
                 return None
 
             chosen = None
@@ -424,18 +473,25 @@ def _browser_transcript_fetch(
             chosen = chosen or tracks[0]
             base = chosen.get("baseUrl")
             if not base:
+                _step("chosen track has no baseUrl", chosen=chosen)
+                _save_debug()
                 return None
 
-            # Fetch the caption XML through the same browser context so it
-            # carries the same cookies/visitor data as the page request.
             resp = ctx.request.get(base)
+            _step("caption fetch", status=resp.status, lang=chosen.get("languageCode"))
             if resp.status >= 400:
-                log.warning("Caption fetch HTTP %s", resp.status)
+                _save_debug()
                 return None
             body = resp.text()
             segments = _parse_caption_body(body)
+            _step("parsed", segments=len(segments))
+            if BROWSER_DEBUG_DIR is not None:
+                try:
+                    (BROWSER_DEBUG_DIR / "raw_captions.txt").write_text(body[:50000], encoding="utf-8")
+                except Exception:
+                    pass
+            _save_debug()
             if segments:
-                log.info("Browser fetch produced %d segments", len(segments))
                 return _format_segments(segments, with_timestamps)
         finally:
             browser.close()
@@ -963,6 +1019,9 @@ def create_session_bundle(
     bundle = DESKTOP_DIR / f"TheConstruct__{title_slug}__{stamp}"
     bundle.mkdir(parents=True, exist_ok=True)
     log.info("Creating bundle: %s", bundle)
+
+    global BROWSER_DEBUG_DIR
+    BROWSER_DEBUG_DIR = bundle
 
     transcript = ""
     transcript_ts = ""
