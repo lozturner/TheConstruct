@@ -257,6 +257,29 @@ def _yt_dlp_fallback(video_id: str, languages: list[str], with_timestamps: bool)
 # Section 3 — Browser voice-clone agent (Playwright) + ElevenLabs API fallback
 # ============================================================================
 
+def _local_tts(text: str, out_path: str) -> str:
+    """Last-resort offline TTS via espeak-ng. Writes a WAV file at out_path
+    (renaming .mp3 -> .wav since espeak-ng emits WAV)."""
+    if not shutil.which("espeak-ng"):
+        raise SynthesisError(
+            "No TTS available: ElevenLabs API key not set, no browser session, "
+            "and espeak-ng is not installed."
+        )
+    out = Path(out_path)
+    if out.suffix.lower() != ".wav":
+        out = out.with_suffix(".wav")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    log.info("Synthesizing via espeak-ng -> %s", out)
+    proc = subprocess.run(
+        ["espeak-ng", "-w", str(out), text],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not out.exists():
+        raise SynthesisError(f"espeak-ng failed: {proc.stderr.strip()}")
+    return str(out)
+
+
 SELECTORS = {
     "playht": {
         "login_url": "https://play.ht/app/login",
@@ -288,7 +311,10 @@ class VoiceCloner:
         if self.config.elevenlabs_api_key:
             log.info("ElevenLabs API key present — browser will be skipped where possible.")
             return self
-        self._start_browser()
+        try:
+            self._start_browser()
+        except VoiceCloneError as e:
+            log.warning("Browser unavailable (%s); will fall back to local TTS.", e)
         return self
 
     def __exit__(self, *exc):
@@ -429,7 +455,11 @@ class VoiceCloner:
         if api:
             return api
         if self._page is None:
-            self._start_browser()
+            try:
+                self._start_browser()
+            except VoiceCloneError:
+                log.warning("No browser available — returning local-tts pseudo voice id.")
+                return "local-tts"
         return self._browser_clone(sample_path)
 
     def synthesize(self, text: str, voice_id: str, out_path: Optional[str] = None) -> str:
@@ -438,7 +468,12 @@ class VoiceCloner:
         if api:
             return api
         if self._page is None:
-            self._start_browser()
+            try:
+                self._start_browser()
+            except VoiceCloneError:
+                return _local_tts(text, out_path)
+        if voice_id == "local-tts":
+            return _local_tts(text, out_path)
         return self._browser_synth(text, voice_id, out_path)
 
 
@@ -582,17 +617,22 @@ def play_audio(path: Path) -> None:
 
 
 def _render_bundle_readme(meta: dict) -> str:
+    audio = meta.get("audio_file") or "(none — synthesis skipped)"
+    err = meta.get("transcript_error")
+    err_line = f"- Transcript error: {err}\n" if err else ""
     return (
         f"# {meta.get('title') or meta['video_id']}\n\n"
         f"Created: {meta['created_at']}\n\n"
         f"- URL: {meta['url']}\n"
         f"- Video ID: {meta['video_id']}\n"
         f"- Voice ID: {meta.get('voice_id') or '(none — synthesis skipped)'}\n"
-        f"- Transcript length: {meta['transcript_chars']} chars\n\n"
+        f"- Audio file: {audio}\n"
+        f"- Transcript length: {meta['transcript_chars']} chars\n"
+        f"{err_line}\n"
         f"## Files\n"
         f"- `transcript.txt` — plain transcript\n"
         f"- `transcript-timestamped.txt` — with timestamps\n"
-        f"- `hello.mp3` — cloned-voice greeting\n"
+        f"- `{audio}` — greeting audio\n"
         f"- `metadata.json` — machine-readable details\n"
         f"- `run.py` — re-runnable script for this URL\n"
         f"- `WALKTHROUGH.md` — how the system works\n"
@@ -627,34 +667,53 @@ def create_session_bundle(
     bundle.mkdir(parents=True, exist_ok=True)
     log.info("Creating bundle: %s", bundle)
 
-    transcript = get_transcript(url)
-    transcript_ts = get_transcript(url, with_timestamps=True)
+    transcript = ""
+    transcript_ts = ""
+    transcript_error: Optional[str] = None
+    try:
+        transcript = get_transcript(url)
+        transcript_ts = get_transcript(url, with_timestamps=True)
+    except Exception as e:
+        transcript_error = f"{type(e).__name__}: {e}"
+        log.warning("Transcript fetch failed: %s", transcript_error)
+        transcript = (
+            f"[Transcript unavailable: {transcript_error}]\n"
+            f"URL: {url}\n"
+            "Run `python theconstruct.py transcript <url>` from a network where\n"
+            "YouTube is reachable to populate this file.\n"
+        )
+        transcript_ts = transcript
+
     (bundle / "transcript.txt").write_text(transcript, encoding="utf-8")
     (bundle / "transcript-timestamped.txt").write_text(transcript_ts, encoding="utf-8")
 
-    audio_path = bundle / "hello.mp3"
+    audio_path: Optional[Path] = None
     used_voice_id: Optional[str] = None
     with VoiceCloner() as vc:
         vid = voice_id or CONFIG.default_voice_id
-        if not vid and CONFIG.sample_voice_path and Path(CONFIG.sample_voice_path).exists():
-            try:
-                vid = vc.clone_voice(CONFIG.sample_voice_path)
-            except Exception as e:
-                log.warning("Voice clone failed: %s", e)
-        if vid:
-            try:
-                vc.synthesize("hi Laurence", vid, str(audio_path))
-                used_voice_id = vid
-            except Exception as e:
-                log.warning("Synthesis failed: %s", e)
-        else:
-            log.warning("No voice id available — skipping audio greeting.")
+        if not vid:
+            if CONFIG.sample_voice_path and Path(CONFIG.sample_voice_path).exists():
+                try:
+                    vid = vc.clone_voice(CONFIG.sample_voice_path)
+                except Exception as e:
+                    log.warning("Voice clone failed: %s", e)
+            else:
+                # No api key, no sample — try local TTS directly.
+                vid = "local-tts"
+        try:
+            produced = vc.synthesize("hi Laurence", vid, str(bundle / "hello.mp3"))
+            audio_path = Path(produced)
+            used_voice_id = vid
+        except Exception as e:
+            log.warning("Synthesis failed: %s", e)
 
     meta = {
         "url": url,
         "video_id": video_id,
         "title": title,
         "voice_id": used_voice_id,
+        "audio_file": audio_path.name if audio_path else None,
+        "transcript_error": transcript_error,
         "created_at": stamp,
         "transcript_chars": len(transcript),
     }
@@ -663,7 +722,7 @@ def create_session_bundle(
     (bundle / "run.py").write_text(_render_run_script(url), encoding="utf-8")
     (bundle / "WALKTHROUGH.md").write_text(WALKTHROUGH_TEXT, encoding="utf-8")
 
-    if play_when_done and audio_path.exists():
+    if play_when_done and audio_path and audio_path.exists():
         play_audio(audio_path)
     if open_when_done:
         open_folder(bundle)

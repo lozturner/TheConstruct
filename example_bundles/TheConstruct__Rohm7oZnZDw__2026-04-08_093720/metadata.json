@@ -1,0 +1,10 @@
+{
+  "url": "https://youtube.com/shorts/Rohm7oZnZDw?si=jtHqrrGyeHWT7-n9",
+  "video_id": "Rohm7oZnZDw",
+  "title": null,
+  "voice_id": "local-tts",
+  "audio_file": "hello.wav",
+  "transcript_error": "TranscriptError: yt-dlp failed: ERROR: [youtube] Rohm7oZnZDw: Unable to download API page: ('Unable to connect to proxy', OSError('Tunnel connection failed: 403 Forbidden')) (caused by ProxyError(\"('Unable to connect to proxy', OSError('Tunnel connection failed: 403 Forbidden'))\")); please report this issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the appropriate issue template. Confirm you are on the latest version using  yt-dlp -U",
+  "created_at": "2026-04-08_093720",
+  "transcript_chars": 658
+}
