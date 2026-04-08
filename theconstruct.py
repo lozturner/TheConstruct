@@ -212,45 +212,92 @@ def get_transcript(
 
 
 def _yt_dlp_fallback(video_id: str, languages: list[str], with_timestamps: bool) -> str:
+    """Fallback chain when youtube-transcript-api fails: try pytubefix, then
+    yt-dlp with multiple player clients to dodge YouTube's bot challenge."""
+    errors: list[str] = []
+
+    # 1. pytubefix — actively maintained fork that updates anti-bot bypasses.
+    try:
+        from pytubefix import YouTube  # type: ignore
+
+        yt = YouTube(f"https://www.youtube.com/watch?v={video_id}")
+        captions = yt.captions
+        track = None
+        for lang in languages:
+            for key in (lang, f"a.{lang}"):
+                if key in captions:
+                    track = captions[key]
+                    break
+            if track:
+                break
+        if not track and captions:
+            track = list(captions.values())[0]
+        if track:
+            xml = track.xml_captions
+            import re as _re
+            segments = []
+            for m in _re.finditer(r'<text[^>]*start="([\d.]+)"[^>]*>([^<]*)</text>', xml):
+                start = float(m.group(1))
+                text = (m.group(2) or "").replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", '"')
+                if text.strip():
+                    segments.append({"text": text.strip(), "start": start})
+            if segments:
+                return _format_segments(segments, with_timestamps)
+    except Exception as e:
+        errors.append(f"pytubefix: {e}")
+
+    # 2. yt-dlp with multiple player_client values.
     try:
         import yt_dlp  # type: ignore
-    except ImportError as e:
-        raise TranscriptError("Primary fetch failed and yt-dlp is not installed.") from e
+    except ImportError:
+        raise TranscriptError(
+            "All transcript fetchers failed. Errors:\n  "
+            + "\n  ".join(errors + ["yt-dlp not installed"])
+        )
 
-    import json
+    import json as _json
     import tempfile
 
-    with tempfile.TemporaryDirectory() as tmp:
-        opts = {
-            "skip_download": True,
-            "writesubtitles": True,
-            "writeautomaticsub": True,
-            "subtitleslangs": languages,
-            "subtitlesformat": "json3",
-            "outtmpl": os.path.join(tmp, "%(id)s.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-        }
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
-        except Exception as e:
-            raise TranscriptError(f"yt-dlp failed: {e}") from e
+    for client in ("ios", "android", "tv_simply", "mweb", "web"):
+        with tempfile.TemporaryDirectory() as tmp:
+            opts = {
+                "skip_download": True,
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": languages,
+                "subtitlesformat": "json3",
+                "outtmpl": os.path.join(tmp, "%(id)s.%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "extractor_args": {"youtube": {"player_client": [client]}},
+                "user_agent": (
+                    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Mobile Safari/537.36"
+                ),
+            }
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+            except Exception as e:
+                errors.append(f"yt-dlp[{client}]: {e}")
+                continue
 
-        for fname in os.listdir(tmp):
-            if fname.endswith(".json3"):
-                with open(os.path.join(tmp, fname), encoding="utf-8") as f:
-                    data = json.load(f)
-                segments = []
-                for ev in data.get("events", []):
-                    if "segs" not in ev:
-                        continue
-                    text = "".join(s.get("utf8", "") for s in ev["segs"]).strip()
-                    if text:
-                        segments.append({"text": text, "start": ev.get("tStartMs", 0) / 1000})
-                if segments:
-                    return _format_segments(segments, with_timestamps)
-        raise TranscriptError("yt-dlp returned no usable subtitles.")
+            for fname in os.listdir(tmp):
+                if fname.endswith(".json3"):
+                    with open(os.path.join(tmp, fname), encoding="utf-8") as f:
+                        data = _json.load(f)
+                    segments = []
+                    for ev in data.get("events", []):
+                        if "segs" not in ev:
+                            continue
+                        text = "".join(s.get("utf8", "") for s in ev["segs"]).strip()
+                        if text:
+                            segments.append({"text": text, "start": ev.get("tStartMs", 0) / 1000})
+                    if segments:
+                        return _format_segments(segments, with_timestamps)
+            errors.append(f"yt-dlp[{client}]: no subtitles in output")
+
+    raise TranscriptError("All transcript fetchers failed:\n  " + "\n  ".join(errors))
 
 
 # ============================================================================
