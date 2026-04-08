@@ -329,13 +329,141 @@ def _parse_caption_body(body: str) -> list[dict]:
     return segments
 
 
+def _browser_transcript_fetch(
+    video_id: str, languages: list[str], with_timestamps: bool
+) -> Optional[str]:
+    """Open YouTube in a real headless Chromium via Playwright and scrape the
+    Show-Transcript panel. YouTube's bot wall is request-shape based, not IP
+    based — a real browser with JS, real headers, and a real fingerprint
+    passes it for anonymous public videos."""
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except ImportError:
+        return None
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    log.info("Browser fetch via Playwright: %s", url)
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        try:
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1366, "height": 900},
+                locale="en-US",
+            )
+            ctx.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
+            page = ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            # Cookie / consent banner
+            for sel in (
+                'button:has-text("Accept all")',
+                'button:has-text("Reject all")',
+                'button[aria-label*="Accept" i]',
+                'button[aria-label*="Reject" i]',
+            ):
+                try:
+                    page.locator(sel).first.click(timeout=3000)
+                    break
+                except Exception:
+                    pass
+
+            # Wait for player surface
+            try:
+                page.wait_for_selector('ytd-watch-flexy, ytd-shorts, #movie_player', timeout=20000)
+            except Exception:
+                pass
+
+            # Expand description so the "Show transcript" button is revealed
+            for sel in (
+                'tp-yt-paper-button#expand',
+                '#expand',
+                'ytd-text-inline-expander #expand',
+            ):
+                try:
+                    page.locator(sel).first.click(timeout=3000)
+                    break
+                except Exception:
+                    pass
+
+            # Click "Show transcript"
+            clicked = False
+            try:
+                page.get_by_role("button", name=re.compile("show transcript", re.I)).first.click(timeout=5000)
+                clicked = True
+            except Exception:
+                pass
+            if not clicked:
+                # Fallback: open the more-actions menu and pick Show transcript
+                try:
+                    page.locator('button[aria-label*="More actions" i]').first.click(timeout=3000)
+                    page.get_by_text(re.compile("show transcript", re.I)).first.click(timeout=3000)
+                    clicked = True
+                except Exception:
+                    pass
+
+            if not clicked:
+                return None
+
+            page.wait_for_selector('ytd-transcript-segment-renderer', timeout=20000)
+
+            segments: list[dict] = []
+            for el in page.locator('ytd-transcript-segment-renderer').all():
+                try:
+                    ts = el.locator('.segment-timestamp').inner_text(timeout=2000).strip()
+                    txt = el.locator('.segment-text').inner_text(timeout=2000).strip()
+                except Exception:
+                    continue
+                parts = ts.split(":")
+                try:
+                    if len(parts) == 2:
+                        start = int(parts[0]) * 60 + int(parts[1])
+                    elif len(parts) == 3:
+                        start = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                    else:
+                        start = 0
+                except ValueError:
+                    start = 0
+                if txt:
+                    segments.append({"text": txt, "start": float(start)})
+
+            if segments:
+                log.info("Browser fetch produced %d segments", len(segments))
+                return _format_segments(segments, with_timestamps)
+        finally:
+            browser.close()
+    return None
+
+
 def _yt_dlp_fallback(video_id: str, languages: list[str], with_timestamps: bool) -> str:
-    """Fallback chain when youtube-transcript-api fails: try Piped instances,
-    then pytubefix, then yt-dlp with multiple player clients to dodge
-    YouTube's bot challenge."""
+    """Fallback chain when youtube-transcript-api fails. Tries (in order):
+    real-browser via Playwright, Piped instances, pytubefix, then yt-dlp with
+    rotating player clients."""
     errors: list[str] = []
 
-    # 0. Piped instances — proxy through community-run YouTube frontends.
+    # 0a. Playwright in a real Chromium — most reliable, bypasses bot wall.
+    try:
+        result = _browser_transcript_fetch(video_id, languages, with_timestamps)
+        if result:
+            return result
+        errors.append("browser: no transcript panel surfaced")
+    except Exception as e:
+        errors.append(f"browser: {e}")
+
+    # 0b. Piped instances — proxy through community-run YouTube frontends.
     try:
         result = _piped_fetch(video_id, languages, with_timestamps)
         if result:
