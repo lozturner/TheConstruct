@@ -1,90 +1,89 @@
 # TheConstruct
 
-YouTube link in. Desktop folder out. No more talking to Claude every time.
+YouTube link in. Desktop folder out.
 
-## What it does
+## Install (one line)
 
-1. You copy a YouTube URL to the clipboard.
-2. The tray app spots it, asks once, then runs the pipeline.
-3. A folder appears on your Desktop named
-   `TheConstruct__<title>__<YYYY-MM-DD_HHMMSS>` containing:
-   - `transcript.txt` and `transcript-timestamped.txt`
-   - `hello.mp3` — your cloned voice saying "hi Laurence"
-   - `metadata.json`
-   - `run.py` (re-runnable single-file script for that exact URL)
-   - `README.md` and `WALKTHROUGH.md`
-4. The folder pops open and the audio plays.
+**Windows (PowerShell):**
 
-## Setup
-
-```bash
-pip install -r requirements.txt
-playwright install chromium      # only needed for the browser-driven path
-cp .env.example .env             # then edit
+```powershell
+iwr -useb https://raw.githubusercontent.com/lozturner/theconstruct/claude/multi-agent-orchestration-ipOZM/install.ps1 | iex
 ```
 
-In `.env` set ONE of:
-
-- `ELEVENLABS_API_KEY` — preferred, uses the official API and skips the browser
-- `VOICE_SERVICE_EMAIL` + `VOICE_SERVICE_PASSWORD` + `SAMPLE_VOICE_PATH` —
-  uses Playwright against PlayHT
-
-## Run
+**macOS / Linux (Terminal):**
 
 ```bash
-python tray.py                   # background tray app — usual mode
+curl -sSL https://raw.githubusercontent.com/lozturner/theconstruct/claude/multi-agent-orchestration-ipOZM/install.sh | bash
 ```
 
-Or use the CLI directly:
+That's it. The installer clones the repo, makes a venv, installs deps,
+puts a **TheConstruct** shortcut on your Desktop, launches the local
+web app, and opens your browser at `http://localhost:7117/`.
 
-```bash
-python theconstruct.py bundle <youtube_url>     # full pipeline + bundle
-python theconstruct.py transcript <youtube_url>
-python theconstruct.py demo                     # smoke test
-```
+Paste a YouTube URL into the box. Hit Go. A folder appears on your
+Desktop with the transcript, your cloned-voice greeting, and a
+re-runnable script. The greeting plays in the page.
 
-A bare URL also works: `python theconstruct.py https://youtu.be/...` runs `bundle`.
+Next time: double-click the **TheConstruct** shortcut on your Desktop.
 
-## Cloud bridge (no local install needed)
+## Prerequisites
 
-Push a URL into `pending_urls.txt` and the GitHub Actions workflow
-`Bundle URL` runs the pipeline on a hosted runner and commits the
-result back to `example_bundles/`. You can also trigger it manually from
-the Actions tab with a URL parameter.
+- **Python 3.10+** on PATH
+  ([python.org/downloads](https://www.python.org/downloads/) — tick "Add
+  to PATH" on Windows)
+- **git** on PATH
 
-### One-time setup: cookies (required for the cloud bridge)
+## Voice config (optional but recommended)
 
-YouTube blocks all unauthenticated requests from datacenter IPs as of
-late 2024 — including GitHub Actions runners. We've verified this with
-a real Chromium screenshot in `example_bundles/`: even a stealth
-Playwright session loads the page shell but the player config comes
-back null with "Sign in to confirm you're not a bot".
+Without any config, the greeting uses the offline `espeak-ng` voice (a
+synthetic robot voice). For a proper cloned voice, set ONE of these in
+`~/TheConstruct/.env` (copy from `.env.example`):
 
-The fix is **one** manual step, done **once**:
+- `ELEVENLABS_API_KEY=sk_...` — cleanest; uses the official API
+- `VOICE_SERVICE_EMAIL` + `VOICE_SERVICE_PASSWORD` + `SAMPLE_VOICE_PATH`
+  — uses a Playwright-driven PlayHT session
 
-1. In a logged-in browser, install the **"Get cookies.txt LOCALLY"**
-   extension (Chrome/Firefox), open `https://www.youtube.com/`, click
-   the extension, hit "Export".
-2. Open the downloaded `cookies.txt` and copy its full contents.
-3. In your GitHub repo: **Settings → Secrets and variables → Actions →
-   New repository secret**. Name it `YT_COOKIES`. Paste the contents.
-   Save.
-4. Push a URL into `pending_urls.txt`. The workflow now uses your
-   cookies, slips past the bot wall, and commits the real bundle back.
+## What's in a bundle
 
-After that, you never touch it again. Drop URLs, get bundles.
+Each run writes a folder to your Desktop named
+`TheConstruct__<title>__<YYYY-MM-DD_HHMMSS>/` containing:
 
-### Local mode (no cookies needed)
+- `transcript.txt`, `transcript-timestamped.txt`
+- `hello.mp3` (or `hello.wav`) — greeting audio
+- `metadata.json` — url, video id, title, voice id, timestamps
+- `run.py` — re-runnable single-file script for this exact URL
+- `README.md`, `WALKTHROUGH.md`
 
-The pipeline running on your own desktop uses your residential IP,
-which YouTube treats normally. `python tray.py` works without any
-cookie setup.
+## Alternative interfaces
+
+- `python tray.py` — system-tray icon + clipboard watcher
+- `python theconstruct.py bundle <url>` — CLI one-shot
+- `python theconstruct.py demo` — offline smoke test
+
+## Cloud bridge (optional, only if you want to run without installing)
+
+Push a YouTube URL into `pending_urls.txt` and the
+`.github/workflows/bundle.yml` workflow runs the pipeline on a GitHub
+runner and commits the produced bundle to `example_bundles/`. Because
+GitHub runners are datacenter IPs, YouTube challenges them with
+"Sign in to confirm you're not a bot" — so the bridge needs **one**
+manual step:
+
+1. Install the **"Get cookies.txt LOCALLY"** browser extension, open
+   `https://www.youtube.com/` while logged in, click the extension,
+   hit "Export".
+2. In your GitHub repo: **Settings → Secrets and variables → Actions →
+   New repository secret**. Name it `YT_COOKIES`, paste the file
+   contents.
+
+After that the bridge works. The local mode above does not need this —
+your residential IP bypasses the block.
 
 ## Files
 
+- `app.py` — local web app at `http://localhost:7117/`
 - `theconstruct.py` — single-file pipeline (transcript + voice clone + bundle)
-- `tray.py` — system tray + clipboard watcher + walkthrough
-- `test_voice_pipeline.py` — smoke test that synthesizes "hi Laurence"
+- `tray.py` — system-tray + clipboard watcher
+- `install.ps1` / `install.sh` — one-line installers
 - `.github/workflows/bundle.yml` — cloud bridge workflow
-- `pending_urls.txt` — drop URLs here to trigger the bridge
 - `requirements.txt`, `.env.example`
