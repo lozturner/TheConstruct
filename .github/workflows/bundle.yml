@@ -1,0 +1,107 @@
+name: Bundle URL
+
+# The bridge. GitHub-hosted runners have unrestricted internet, so the
+# pipeline that can't reach YouTube from a sandbox can run reliably here.
+#
+# Two ways to trigger:
+#   1. Manual: Actions tab -> "Bundle URL" -> Run workflow -> paste URL.
+#   2. Auto:   write a YouTube URL into pending_urls.txt (one per line) and
+#              push. The workflow runs, commits the bundle to
+#              example_bundles/, and clears pending_urls.txt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "YouTube URL to process"
+        required: true
+        type: string
+  push:
+    paths:
+      - pending_urls.txt
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system + python deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq espeak-ng
+          python -m pip install --upgrade pip
+          pip install youtube-transcript-api yt-dlp python-dotenv requests
+
+      - name: Collect URLs to process
+        id: urls
+        run: |
+          urls=()
+          if [ -n "${{ github.event.inputs.url }}" ]; then
+            urls+=("${{ github.event.inputs.url }}")
+          fi
+          if [ -f pending_urls.txt ]; then
+            while IFS= read -r line; do
+              line="${line%%#*}"
+              line="$(echo "$line" | xargs)"
+              if [ -n "$line" ]; then urls+=("$line"); fi
+            done < pending_urls.txt
+          fi
+          if [ ${#urls[@]} -eq 0 ]; then
+            echo "No URLs to process; exiting."
+            echo "found=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s\n' "${urls[@]}" > /tmp/urls.txt
+          echo "found=${#urls[@]}" >> "$GITHUB_OUTPUT"
+          cat /tmp/urls.txt
+
+      - name: Run bundle for each URL
+        if: steps.urls.outputs.found != '0'
+        env:
+          THECONSTRUCT_DESKTOP: ${{ github.workspace }}/example_bundles
+        run: |
+          mkdir -p example_bundles
+          while IFS= read -r url; do
+            echo "::group::Bundling $url"
+            python theconstruct.py bundle "$url" --no-open --no-play || {
+              echo "::error::bundle failed for $url"
+              exit 1
+            }
+            echo "::endgroup::"
+          done < /tmp/urls.txt
+
+      - name: Clear pending_urls.txt
+        if: steps.urls.outputs.found != '0'
+        run: |
+          if [ -f pending_urls.txt ]; then
+            : > pending_urls.txt
+          fi
+
+      - name: Commit bundle artifacts
+        if: steps.urls.outputs.found != '0'
+        run: |
+          git config user.name  "theconstruct-bot"
+          git config user.email "theconstruct-bot@users.noreply.github.com"
+          git add example_bundles/ pending_urls.txt 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "ci: bundle $(wc -l </tmp/urls.txt) URL(s) [skip ci]"
+          for i in 1 2 3 4; do
+            git push origin HEAD:${{ github.ref_name }} && exit 0
+            echo "push retry $i..."
+            sleep $((2**i))
+          done
+          exit 1

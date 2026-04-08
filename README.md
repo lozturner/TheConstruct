@@ -45,9 +45,19 @@ python theconstruct.py demo                     # smoke test
 
 A bare URL also works: `python theconstruct.py https://youtu.be/...` runs `bundle`.
 
+## Cloud bridge (no local install needed)
+
+If your machine can't reach YouTube — or you just don't want to install
+anything — push a URL into `pending_urls.txt` and the GitHub Actions
+workflow `Bundle URL` runs the pipeline on a hosted runner and commits the
+result back to `example_bundles/`. You can also trigger it manually from
+the Actions tab with a URL parameter.
+
 ## Files
 
 - `theconstruct.py` — single-file pipeline (transcript + voice clone + bundle)
 - `tray.py` — system tray + clipboard watcher + walkthrough
 - `test_voice_pipeline.py` — smoke test that synthesizes "hi Laurence"
+- `.github/workflows/bundle.yml` — cloud bridge workflow
+- `pending_urls.txt` — drop URLs here to trigger the bridge
 - `requirements.txt`, `.env.example`
