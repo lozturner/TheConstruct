@@ -332,16 +332,17 @@ def _parse_caption_body(body: str) -> list[dict]:
 def _browser_transcript_fetch(
     video_id: str, languages: list[str], with_timestamps: bool
 ) -> Optional[str]:
-    """Open YouTube in a real headless Chromium via Playwright and scrape the
-    Show-Transcript panel. YouTube's bot wall is request-shape based, not IP
-    based — a real browser with JS, real headers, and a real fingerprint
-    passes it for anonymous public videos."""
+    """Load the watch page in a real headless Chromium via Playwright. Extract
+    `ytInitialPlayerResponse` directly from the page (the same JS object the
+    YouTube player uses). The captionTracks[].baseUrl values are session-
+    authenticated by the browser, so we fetch them through the same
+    Playwright request context to inherit cookies and headers."""
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
     except ImportError:
         return None
 
-    url = f"https://www.youtube.com/watch?v={video_id}"
+    url = f"https://www.youtube.com/watch?v={video_id}&hl=en"
     log.info("Browser fetch via Playwright: %s", url)
 
     with sync_playwright() as pw:
@@ -368,78 +369,71 @@ def _browser_transcript_fetch(
             page = ctx.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-            # Cookie / consent banner
+            # Dismiss any consent banner so the page actually loads its scripts
             for sel in (
-                'button:has-text("Accept all")',
-                'button:has-text("Reject all")',
                 'button[aria-label*="Accept" i]',
+                'button:has-text("Accept all")',
                 'button[aria-label*="Reject" i]',
+                'button:has-text("Reject all")',
             ):
                 try:
-                    page.locator(sel).first.click(timeout=3000)
+                    page.locator(sel).first.click(timeout=2500)
                     break
                 except Exception:
                     pass
 
-            # Wait for player surface
+            # Wait until ytInitialPlayerResponse is parsed onto window
             try:
-                page.wait_for_selector('ytd-watch-flexy, ytd-shorts, #movie_player', timeout=20000)
+                page.wait_for_function(
+                    "typeof window.ytInitialPlayerResponse !== 'undefined' "
+                    "&& window.ytInitialPlayerResponse !== null",
+                    timeout=20000,
+                )
             except Exception:
                 pass
 
-            # Expand description so the "Show transcript" button is revealed
-            for sel in (
-                'tp-yt-paper-button#expand',
-                '#expand',
-                'ytd-text-inline-expander #expand',
-            ):
+            player = page.evaluate("() => window.ytInitialPlayerResponse || null")
+            if not player:
+                # Fall back: regex out of the raw HTML
                 try:
-                    page.locator(sel).first.click(timeout=3000)
-                    break
+                    html = page.content()
+                    import re as _re
+                    import json as _json
+                    m = _re.search(r"ytInitialPlayerResponse\s*=\s*(\{.+?\});", html)
+                    if m:
+                        player = _json.loads(m.group(1))
                 except Exception:
                     pass
 
-            # Click "Show transcript"
-            clicked = False
-            try:
-                page.get_by_role("button", name=re.compile("show transcript", re.I)).first.click(timeout=5000)
-                clicked = True
-            except Exception:
-                pass
-            if not clicked:
-                # Fallback: open the more-actions menu and pick Show transcript
-                try:
-                    page.locator('button[aria-label*="More actions" i]').first.click(timeout=3000)
-                    page.get_by_text(re.compile("show transcript", re.I)).first.click(timeout=3000)
-                    clicked = True
-                except Exception:
-                    pass
-
-            if not clicked:
+            if not player:
                 return None
 
-            page.wait_for_selector('ytd-transcript-segment-renderer', timeout=20000)
+            cap = (player.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}
+            tracks = cap.get("captionTracks") or []
+            if not tracks:
+                return None
 
-            segments: list[dict] = []
-            for el in page.locator('ytd-transcript-segment-renderer').all():
-                try:
-                    ts = el.locator('.segment-timestamp').inner_text(timeout=2000).strip()
-                    txt = el.locator('.segment-text').inner_text(timeout=2000).strip()
-                except Exception:
-                    continue
-                parts = ts.split(":")
-                try:
-                    if len(parts) == 2:
-                        start = int(parts[0]) * 60 + int(parts[1])
-                    elif len(parts) == 3:
-                        start = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-                    else:
-                        start = 0
-                except ValueError:
-                    start = 0
-                if txt:
-                    segments.append({"text": txt, "start": float(start)})
+            chosen = None
+            for lang in languages:
+                for t in tracks:
+                    if (t.get("languageCode") or "").startswith(lang):
+                        chosen = t
+                        break
+                if chosen:
+                    break
+            chosen = chosen or tracks[0]
+            base = chosen.get("baseUrl")
+            if not base:
+                return None
 
+            # Fetch the caption XML through the same browser context so it
+            # carries the same cookies/visitor data as the page request.
+            resp = ctx.request.get(base)
+            if resp.status >= 400:
+                log.warning("Caption fetch HTTP %s", resp.status)
+                return None
+            body = resp.text()
+            segments = _parse_caption_body(body)
             if segments:
                 log.info("Browser fetch produced %d segments", len(segments))
                 return _format_segments(segments, with_timestamps)
