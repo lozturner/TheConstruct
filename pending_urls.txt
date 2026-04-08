@@ -1,0 +1,4 @@
+# YouTube URLs to process. One per line. Lines starting with # are ignored.
+# When you push this file with content, the Bundle URL workflow runs and
+# writes the produced bundles into example_bundles/ as a follow-up commit.
+https://youtube.com/shorts/Rohm7oZnZDw?si=jtHqrrGyeHWT7-n9

@@ -389,6 +389,27 @@ def _browser_transcript_fetch(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             )
             page = ctx.new_page()
+
+            # Establish a visitor session by browsing the homepage first.
+            # YouTube grants visitor_data cookies during a real navigation,
+            # which the secondary /youtubei/v1/player call needs.
+            try:
+                page.goto("https://www.youtube.com/?gl=US&hl=en", wait_until="domcontentloaded", timeout=45000)
+                _step("warmed up homepage", title=page.title())
+                for sel in (
+                    'button[aria-label*="Accept" i]',
+                    'button:has-text("Accept all")',
+                ):
+                    try:
+                        page.locator(sel).first.click(timeout=2000)
+                        _step("accepted cookies on homepage")
+                        break
+                    except Exception:
+                        pass
+                page.wait_for_timeout(1500)
+            except Exception as e:
+                _step("homepage warmup failed", err=str(e))
+
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             _step("page loaded", final_url=page.url, title=page.title())
 
@@ -457,8 +478,42 @@ def _browser_transcript_fetch(
                 for t in tracks
             ]
             _step("captions enumerated", count=len(tracks))
+
             if not tracks:
-                _step("no caption tracks for this video")
+                # Retry through the embed player which has a different anti-bot path.
+                _step("retrying via embed URL")
+                try:
+                    embed_url = f"https://www.youtube.com/embed/{video_id}?html5=1&hl=en"
+                    page.goto(embed_url, wait_until="domcontentloaded", timeout=45000)
+                    page.wait_for_timeout(2500)
+                    embed_player = page.evaluate("() => window.ytcfg && (window.ytcfg.data_ || {}).PLAYER_CONFIG || null")
+                    if not embed_player:
+                        # Regex out of HTML
+                        html = page.content()
+                        import re as _re
+                        import json as _json
+                        m = _re.search(r'"playerResponse"\s*:\s*"([^"]+)"', html)
+                        if m:
+                            decoded = m.group(1).encode().decode("unicode_escape")
+                            embed_player = _json.loads(decoded)
+                    if embed_player:
+                        ec = (embed_player.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}
+                        tracks = ec.get("captionTracks") or []
+                        debug["embed_caption_tracks"] = [
+                            {"lang": t.get("languageCode"), "kind": t.get("kind")}
+                            for t in tracks
+                        ]
+                        _step("embed captions enumerated", count=len(tracks))
+                        if BROWSER_DEBUG_DIR is not None:
+                            try:
+                                page.screenshot(path=str(BROWSER_DEBUG_DIR / "browser_screenshot_embed.png"), full_page=True)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    _step("embed retry failed", err=str(e))
+
+            if not tracks:
+                _step("no caption tracks via watch or embed")
                 _save_debug()
                 return None
 
