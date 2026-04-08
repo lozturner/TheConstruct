@@ -47,11 +47,38 @@ A bare URL also works: `python theconstruct.py https://youtu.be/...` runs `bundl
 
 ## Cloud bridge (no local install needed)
 
-If your machine can't reach YouTube — or you just don't want to install
-anything — push a URL into `pending_urls.txt` and the GitHub Actions
-workflow `Bundle URL` runs the pipeline on a hosted runner and commits the
+Push a URL into `pending_urls.txt` and the GitHub Actions workflow
+`Bundle URL` runs the pipeline on a hosted runner and commits the
 result back to `example_bundles/`. You can also trigger it manually from
 the Actions tab with a URL parameter.
+
+### One-time setup: cookies (required for the cloud bridge)
+
+YouTube blocks all unauthenticated requests from datacenter IPs as of
+late 2024 — including GitHub Actions runners. We've verified this with
+a real Chromium screenshot in `example_bundles/`: even a stealth
+Playwright session loads the page shell but the player config comes
+back null with "Sign in to confirm you're not a bot".
+
+The fix is **one** manual step, done **once**:
+
+1. In a logged-in browser, install the **"Get cookies.txt LOCALLY"**
+   extension (Chrome/Firefox), open `https://www.youtube.com/`, click
+   the extension, hit "Export".
+2. Open the downloaded `cookies.txt` and copy its full contents.
+3. In your GitHub repo: **Settings → Secrets and variables → Actions →
+   New repository secret**. Name it `YT_COOKIES`. Paste the contents.
+   Save.
+4. Push a URL into `pending_urls.txt`. The workflow now uses your
+   cookies, slips past the bot wall, and commits the real bundle back.
+
+After that, you never touch it again. Drop URLs, get bundles.
+
+### Local mode (no cookies needed)
+
+The pipeline running on your own desktop uses your residential IP,
+which YouTube treats normally. `python tray.py` works without any
+cookie setup.
 
 ## Files
 

@@ -67,6 +67,19 @@ jobs:
           echo "found=${#urls[@]}" >> "$GITHUB_OUTPUT"
           cat /tmp/urls.txt
 
+      - name: Restore YouTube cookies (optional)
+        if: steps.urls.outputs.found != '0'
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          if [ -n "$YT_COOKIES" ]; then
+            printf '%s' "$YT_COOKIES" > /tmp/yt_cookies.txt
+            echo "YT_COOKIES_FILE=/tmp/yt_cookies.txt" >> "$GITHUB_ENV"
+            echo "Loaded $(wc -l < /tmp/yt_cookies.txt) lines of cookie data."
+          else
+            echo "No YT_COOKIES secret set — datacenter IP will hit YouTube's bot wall."
+          fi
+
       - name: Run bundle for each URL
         if: steps.urls.outputs.found != '0'
         env:

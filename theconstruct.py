@@ -211,6 +211,32 @@ def get_transcript(
         return _yt_dlp_fallback(video_id, languages, with_timestamps)
 
 
+def _load_netscape_cookies(path: str) -> list[dict]:
+    """Parse a Netscape-format cookies.txt and return Playwright cookie dicts."""
+    out: list[dict] = []
+    try:
+        for line in Path(path).read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                continue
+            domain, flag, cpath, secure, expires, name, value = parts[:7]
+            out.append({
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": cpath or "/",
+                "expires": float(expires) if expires.isdigit() else -1,
+                "secure": secure.upper() == "TRUE",
+                "httpOnly": False,
+                "sameSite": "Lax",
+            })
+    except Exception:
+        pass
+    return out
+
+
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://pipedapi-libre.kavin.rocks",
@@ -388,6 +414,19 @@ def _browser_transcript_fetch(
             ctx.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             )
+
+            # Load Netscape-format cookies if provided. This is the one-time
+            # user step that gets us past YouTube's bot wall on datacenter IPs.
+            cookies_file = os.environ.get("YT_COOKIES_FILE")
+            if cookies_file and Path(cookies_file).exists():
+                try:
+                    cookies = _load_netscape_cookies(cookies_file)
+                    if cookies:
+                        ctx.add_cookies(cookies)
+                        _step("loaded cookies", count=len(cookies))
+                except Exception as e:
+                    _step("cookie load failed", err=str(e))
+
             page = ctx.new_page()
 
             # Establish a visitor session by browsing the homepage first.
@@ -619,9 +658,10 @@ def _yt_dlp_fallback(video_id: str, languages: list[str], with_timestamps: bool)
     import json as _json
     import tempfile
 
+    cookies_file = os.environ.get("YT_COOKIES_FILE")
     for client in ("ios", "android", "tv_simply", "mweb", "web"):
         with tempfile.TemporaryDirectory() as tmp:
-            opts = {
+            opts: dict = {
                 "skip_download": True,
                 "writesubtitles": True,
                 "writeautomaticsub": True,
@@ -636,6 +676,8 @@ def _yt_dlp_fallback(video_id: str, languages: list[str], with_timestamps: bool)
                     "Chrome/120.0.0.0 Mobile Safari/537.36"
                 ),
             }
+            if cookies_file and Path(cookies_file).exists():
+                opts["cookiefile"] = cookies_file
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
