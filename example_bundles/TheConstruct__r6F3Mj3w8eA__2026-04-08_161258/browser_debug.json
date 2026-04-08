@@ -1,0 +1,41 @@
+{
+  "steps": [
+    {
+      "msg": "starting",
+      "url": "https://www.youtube.com/watch?v=r6F3Mj3w8eA&hl=en"
+    },
+    {
+      "msg": "warmed up homepage",
+      "title": "YouTube"
+    },
+    {
+      "msg": "page loaded",
+      "final_url": "https://www.youtube.com/watch?v=r6F3Mj3w8eA&hl=en",
+      "title": "- YouTube"
+    },
+    {
+      "msg": "ytInitialPlayerResponse present"
+    },
+    {
+      "msg": "saved screenshot"
+    },
+    {
+      "msg": "captions enumerated",
+      "count": 0
+    },
+    {
+      "msg": "retrying via embed URL"
+    },
+    {
+      "msg": "no caption tracks via watch or embed"
+    }
+  ],
+  "videoDetails": {
+    "title": null,
+    "author": null,
+    "lengthSeconds": null,
+    "isLiveContent": null,
+    "shortDescription": ""
+  },
+  "caption_tracks": []
+}
