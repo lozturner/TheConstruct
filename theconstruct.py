@@ -211,10 +211,138 @@ def get_transcript(
         return _yt_dlp_fallback(video_id, languages, with_timestamps)
 
 
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi-libre.kavin.rocks",
+    "https://pipedapi.leptons.xyz",
+    "https://pipedapi.nosebs.ru",
+    "https://pipedapi.adminforge.de",
+    "https://pipedapi.smnz.de",
+    "https://api-piped.mha.fi",
+    "https://pipedapi.r4fo.com",
+    "https://pipedapi.darkness.services",
+]
+
+
+def _piped_fetch(video_id: str, languages: list[str], with_timestamps: bool) -> Optional[str]:
+    """Fetch a transcript by going through community Piped instances.
+    Piped proxies through their own IPs and serves caption metadata as JSON
+    plus VTT/SRV1 caption files. None of this requires authentication."""
+    import requests as _rq
+
+    last_err: Optional[str] = None
+    for base in PIPED_INSTANCES:
+        try:
+            r = _rq.get(f"{base}/streams/{video_id}", timeout=15)
+            if r.status_code != 200:
+                last_err = f"{base}: HTTP {r.status_code}"
+                continue
+            data = r.json()
+        except Exception as e:
+            last_err = f"{base}: {e}"
+            continue
+
+        subtitles = data.get("subtitles") or []
+        if not subtitles:
+            last_err = f"{base}: no subtitles in stream metadata"
+            continue
+
+        chosen = None
+        for lang in languages:
+            for s in subtitles:
+                if (s.get("code") or "").startswith(lang):
+                    chosen = s
+                    break
+            if chosen:
+                break
+        chosen = chosen or subtitles[0]
+
+        url = chosen.get("url")
+        if not url:
+            continue
+        try:
+            cr = _rq.get(url, timeout=15)
+            if cr.status_code != 200:
+                last_err = f"{base} caption fetch: HTTP {cr.status_code}"
+                continue
+            body = cr.text
+        except Exception as e:
+            last_err = f"{base} caption fetch: {e}"
+            continue
+
+        segments = _parse_caption_body(body)
+        if segments:
+            log.info("Got transcript via Piped instance %s (%d segments)", base, len(segments))
+            return _format_segments(segments, with_timestamps)
+        last_err = f"{base}: caption body unparseable"
+
+    if last_err:
+        log.warning("All Piped instances failed; last error: %s", last_err)
+    return None
+
+
+def _parse_caption_body(body: str) -> list[dict]:
+    """Parse a caption document. Supports SRV1/TTML XML and WebVTT."""
+    import re as _re
+
+    segments: list[dict] = []
+
+    # SRV1 / TTML XML — <text start="12.34" dur="1.0">words</text>
+    if "<text" in body:
+        for m in _re.finditer(r'<text[^>]*start="([\d.]+)"[^>]*>([^<]*)</text>', body):
+            text = (m.group(2) or "")
+            text = (
+                text.replace("&amp;", "&")
+                .replace("&#39;", "'")
+                .replace("&quot;", '"')
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .strip()
+            )
+            if text:
+                segments.append({"text": text, "start": float(m.group(1))})
+        if segments:
+            return segments
+
+    # WebVTT — `00:00:01.000 --> 00:00:03.000\nText line\n\n`
+    if "WEBVTT" in body or "-->" in body:
+        block: list[str] = []
+        start: float = 0.0
+        for line in body.splitlines() + [""]:
+            if "-->" in line:
+                m = _re.match(r"(\d+):(\d+):([\d.]+)\s*-->", line)
+                if m:
+                    h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+                    start = h * 3600 + mn * 60 + s
+                block = []
+            elif line.strip() == "":
+                if block:
+                    text = " ".join(block).strip()
+                    if text:
+                        segments.append({"text": text, "start": start})
+                block = []
+            else:
+                if line.strip().isdigit() or line.startswith("WEBVTT"):
+                    continue
+                block.append(_re.sub(r"<[^>]+>", "", line))
+
+    return segments
+
+
 def _yt_dlp_fallback(video_id: str, languages: list[str], with_timestamps: bool) -> str:
-    """Fallback chain when youtube-transcript-api fails: try pytubefix, then
-    yt-dlp with multiple player clients to dodge YouTube's bot challenge."""
+    """Fallback chain when youtube-transcript-api fails: try Piped instances,
+    then pytubefix, then yt-dlp with multiple player clients to dodge
+    YouTube's bot challenge."""
     errors: list[str] = []
+
+    # 0. Piped instances — proxy through community-run YouTube frontends.
+    try:
+        result = _piped_fetch(video_id, languages, with_timestamps)
+        if result:
+            return result
+        errors.append("piped: no instance returned a transcript")
+    except Exception as e:
+        errors.append(f"piped: {e}")
 
     # 1. pytubefix — actively maintained fork that updates anti-bot bypasses.
     try:
